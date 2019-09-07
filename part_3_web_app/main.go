@@ -1,9 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"html/template"
 	"io/ioutil"
 	"net/http"
+	"strconv"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type Page struct {
@@ -11,9 +16,23 @@ type Page struct {
 	Body  []byte
 }
 
-func (p *Page) save() error {
+var (
+	tmplView = template.Must(template.New("test").ParseFiles("base.html", "test.html", "index.html"))
+	tmplEdit = template.Must(template.New("edit").ParseFiles("base.html", "edit.html", "index.html"))
+	db, _    = sql.Open("sqlite3", "cache/web.db")
+	createDB = "create table if not exists pages (title text, body blob, timestamp text)"
+)
+
+func (p *Page) saveCache() error {
+	timeStamp := strconv.FormatInt(time.Now().Unix(), 10)
 	f := p.Title + ".txt"
-	return ioutil.WriteFile(f, p.Body, 0600)
+	db.Exec(createDB)
+	tx, _ := db.Begin()
+	stmt, _ := tx.Prepare("insert into pages (title, body, timestamp) values (?, ?, ?)")
+	_, err := stmt.Exec(p.Title, p.Body, timeStamp)
+	tx.Commit()
+	ioutil.WriteFile(f, p.Body, 0600)
+	return err
 }
 
 func load(title string) (*Page, error) {
@@ -25,33 +44,65 @@ func load(title string) (*Page, error) {
 	return &Page{Title: title, Body: body}, nil
 }
 
+func loadSource(title string) (*Page, error) {
+	var name string
+	var body []byte
+	q, err := db.Query("select title, body from pages where title = '" + title + "'  order by timestamp Desc limit 1")
+
+	if err != nil {
+		return nil, err
+	}
+
+	for q.Next() {
+		q.Scan(&name, &body)
+	}
+
+	return &Page{Title: name, Body: body}, nil
+}
+
 func view(w http.ResponseWriter, r *http.Request) {
+
 	title := r.URL.Path[len("/test/"):]
-	p, _ := load(title)
-	t, _ := template.ParseFiles("test.html")
-	t.Execute(w, p)
+	p, err := loadSource(title)
+	if err != nil {
+		p, _ = load(title)
+	}
+	if p.Title == "" {
+		p, _ = load(title)
+	}
+
+	tmplView.ExecuteTemplate(w, "base", p)
+	//t, _ := template.ParseFiles("test.html")
+	//t.Execute(w, p)
 }
 
 func edit(w http.ResponseWriter, r *http.Request) {
 	title := r.URL.Path[len("/edit/"):]
-	p, _ := load(title)
-	t, _ := template.ParseFiles("edit.html")
-	t.Execute(w, p)
+	p, err := loadSource(title)
+	if err != nil {
+		p, _ = load(title)
+	}
+	if p.Title == "" {
+		p, _ = load(title)
+	}
+
+	tmplEdit.ExecuteTemplate(w, "base", p)
+	//t, _ := template.ParseFiles("edit.html")
+	//t.Execute(w, p)
 }
 
-func save(w http.ResponseWriter, r *http.Request) {
+func saveCache(w http.ResponseWriter, r *http.Request) {
 	title := r.URL.Path[len("/save/"):]
 	body := r.FormValue("body")
 	p := &Page{Title: title, Body: []byte(body)}
-	p.save()
+	p.saveCache()
 	http.Redirect(w, r, "/test/"+title, http.StatusFound)
 }
 
 func main() {
-	p := &Page{Title: "test", Body: []byte("Welcome to the Test Page!")}
-	p.save()
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/test/", view)
 	http.HandleFunc("/edit/", edit)
-	http.HandleFunc("/save/", save)
+	http.HandleFunc("/save/", saveCache)
 	http.ListenAndServe(":8000", nil)
 }
